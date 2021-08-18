@@ -13,6 +13,9 @@ import socket
 import struct
 import math 
 from scipy import signal
+from scipy.integrate import odeint
+import os
+
 
 class Plot2D():
     def __init__(self):
@@ -31,7 +34,7 @@ class Plot2D():
         pg.setConfigOptions(antialias=True)
 
         self.canvas = self.win.addPlot(title="EMG")
-        self.canvas.setYRange(-11, 11, padding=0)
+        self.canvas.setYRange(-5, 5, padding=0)
         self.canvas.addLegend(offset=(20, 20))
         self.canvas.setLabel('left', 'mV')
         self.canvas.hideAxis('bottom')
@@ -49,6 +52,11 @@ class Plot2D():
         elif name == "LE":
             self.traces[name] = self.canvas.plot(pen='r', name="Linear Envelope")
 
+        elif name == "A":
+            self.traces[name] = self.canvas.plot(pen='b', name="Normalised Activation")
+
+        elif name == "V":
+            self.traces[name] = self.canvas.plot(pen='g', name="Fatigue")
 
         else:
             self.traces[name] = self.canvas.plot(pen='y', fillLevel=20.0, fillOutline=True, name="EMG Biceps")
@@ -56,12 +64,36 @@ class Plot2D():
 
 # Start Qt event loop unless running in interactive mode or using pyside.
 if __name__ == '__main__':
+
+    file = open(r"C:\Users\Alvaro\source\repos\CalibExp\calibparam.txt", "r")
+    lines = file.readlines()
+
+    MVC = float(lines[0])
+    Tend = float(lines[1])
+    Cf = -(0.3*MVC*Tend)/(math.log((1-0.993), 10))
+    Ath = 0.4
+    timestep = 0
+    samples = 50
+    emgrate=1500
+    file.close()
+
+    # UDP CONNECTION CONSTANTS
+    KUKA_IP = "192.180.1.5"
+    KUKA_PORT = 54002
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+
+
+   
+
+    vo = 0
     p = Plot2D()
 #    i = 0
 #    f = np.zeros((1,270),dtype=float)
 #    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 #    s.setblocking(0)
-    dev = pytrigno.TrignoEMG(channel_range=(0, 0), samples_per_read=300, host='localhost', units='mV')
+    dev = pytrigno.TrignoEMG(channel_range=(0, 0), samples_per_read=samples, host='localhost', units='mV')
+    dev.rate = emgrate
     dev.start()
 #    if s.bind(("127.0.0.1", 5555)) == -1:
 #        print("The binding did not work")
@@ -100,37 +132,71 @@ if __name__ == '__main__':
 
         return sle
 
+    def fatigue(v, t):
+
+        global Cf, norm
+
+        return (1-v)*(norm.max()/Cf)
+
+
+    def recov(v, t):
+
+        global Cf
+
+        R = 0.5
+        return -v*(R/Cf)
 
 
     def update():
-        global p, l, f, s
+        global p, l, f, s, norm, v, MVC, vo, Ath, timestep, samples, emgrate, KUKA_IP, KUKA_PORT
 
         
-        t = np.arange(0,300,1)
+        t = np.arange(0,((samples*(1/emgrate))) , 1/emgrate)
+#        timestep = t[len(t)-1] + (1/emgrate)
+        
 #        fp = f
 #        fd = np.full(len(t), 10.0)
 #        p.trace("Fd", t, fd)
 #        f, address = s.recvfrom(1024)
         f = dev.read()
-        assert f.shape == (1, 300)
+        assert f.shape == (1, samples)
 #        f = struct.unpack('d', f)
         
 #        print(f)
 #        c = np.full(len(t), f)
         f = f.T
-        s = f.reshape(300,)
+        s = f.reshape(samples,)
         p.trace("EMG", t, s)
 
-        l = LE(s, 20, 50, 6, 4, 2000)
+        l = LE(s, 20, 50, 6, 4, emgrate)
         p.trace("LE", t, l)
- #       if i == 100:
- #           p.trace("Fd", t, fd)
- #           p.trace("F", t, c)
- #           i = 0
+ 
+        norm = l/MVC
+        p.trace("A", t, norm)
 
-#        i += 1
+        if(norm.max()>= Ath):
+            v = odeint(fatigue,vo,t)
+            v = v.reshape(samples,)
+            p.trace("V", t, v)
+            vo = v[len(v)-1]
+        elif(norm.max()<Ath):
+            v = odeint(recov,vo,t)
+            v = v.reshape(samples,)
+            p.trace("V", t, v)
+            vo = v[len(v)-1]
+        fat = np.sum(v)/samples;
+        sfat = str(fat)
+        sock.sendto(sfat.encode('ascii'), (KUKA_IP, KUKA_PORT))
+        
+        
+
+
+       
+        
+        
 
     timer = QtCore.QTimer()
     timer.timeout.connect(update)
     timer.start()
     p.start()
+    
